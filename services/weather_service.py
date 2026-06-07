@@ -157,16 +157,67 @@ def get_desc_from_code(code):
 
 # Helper functions for CLI tool
 def save_weather_data(db, city: str, weather_data: dict):
-    """Save weather data to database (placeholder for CLI compatibility)."""
-    # This would integrate with database.py model if needed
-    # For now, just return success since dashboard doesn't use DB
+    """Persist a current observation for a city. Accepts both the legacy
+    wttr-style payload ('current_condition') and the rich Open-Meteo payload
+    ('current'). Creates the Location on first sight. Returns True on success."""
+    from models import Location, WeatherRecord
+
+    city_key = city.strip().lower()
+    location = db.query(Location).filter(Location.city == city_key).first()
+    if location is None:
+        location = Location(city=city_key)
+        db.add(location)
+        db.commit()
+        db.refresh(location)
+
+    if "current_condition" in weather_data:  # legacy / wttr.in format
+        c = weather_data["current_condition"][0]
+        record = WeatherRecord(
+            location_id=location.id,
+            temp_c=float(c["temp_C"]),
+            temp_f=float(c.get("temp_F") or 0),
+            humidity=float(c.get("humidity") or 0),
+            wind_speed_kmph=float(c.get("windspeedKmph") or 0),
+            condition_text=c.get("weatherDesc", [{}])[0].get("value", ""),
+        )
+    elif "current" in weather_data:  # rich Open-Meteo format
+        c = weather_data["current"]
+        temp_c = float(c.get("temp", 0))
+        record = WeatherRecord(
+            location_id=location.id,
+            temp_c=temp_c,
+            temp_f=temp_c * 9 / 5 + 32,
+            humidity=float(c.get("humidity", 0)),
+            wind_speed_kmph=float(c.get("wind_speed", 0)),
+            condition_text=str(c.get("weather_code", "")),
+        )
+    else:
+        return False
+
+    db.add(record)
+    db.commit()
     return True
 
+
 def get_history_stats(db, city: str, days: int = 7):
-    """Get historical weather stats from database (placeholder for CLI compatibility)."""
-    # This would query the database for historical records
-    # For now, return empty list since we're using API-only approach
-    return []
+    """Return a city's WeatherRecords from the last `days` days, newest first."""
+    from datetime import datetime, timedelta, timezone
+    from models import Location, WeatherRecord
+
+    city_key = city.strip().lower()
+    location = db.query(Location).filter(Location.city == city_key).first()
+    if location is None:
+        return []
+
+    # naive UTC (matches SQLite's server_default func.now() storage)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    return (
+        db.query(WeatherRecord)
+        .filter(WeatherRecord.location_id == location.id)
+        .filter(WeatherRecord.timestamp >= cutoff)
+        .order_by(WeatherRecord.timestamp.desc())
+        .all()
+    )
 
 def export_history_to_file(db, city: str, output_file: str):
     """Export weather history to CSV/JSON file."""
