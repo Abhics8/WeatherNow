@@ -1,20 +1,32 @@
 import torch
 import torch.nn as nn
 
+
 class WeatherLSTM(nn.Module):
-    def __init__(self, input_size=1, hidden_size=50, num_layers=2, output_size=1):
-        super(WeatherLSTM, self).__init__()
+    """
+    2-layer LSTM temperature forecaster with dropout.
+
+    The dropout layer is what enables Monte-Carlo dropout uncertainty at
+    inference time (see ml/forecast.mc_dropout_predict): keeping dropout active
+    across many stochastic forward passes yields a predictive distribution, not
+    just a point estimate.
+    """
+
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, output_size=1, dropout=0.2):
+        super().__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.lstm = nn.LSTM(
+            input_size,
+            hidden_size,
+            num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+        )
+        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        
-        out, _ = self.lstm(x, (h0, c0))
-        # out: batch_size, seq_len, hidden_size
-        out = self.fc(out[:, -1, :])
-        return out
+        out, _ = self.lstm(x)              # (batch, seq_len, hidden)
+        out = self.dropout(out[:, -1, :])  # last time step + dropout
+        return self.fc(out)
