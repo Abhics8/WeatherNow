@@ -190,7 +190,7 @@ with c4: st.metric("🍃 Air Quality", f"{curr['aqi']}")
 
 # TABS
 st.markdown("<br>", unsafe_allow_html=True)
-t1, t2, t3 = st.tabs(["📅 Forecast", "🗺️ Radar", "ℹ️ Details"])
+t1, t2, t3, t4 = st.tabs(["📅 Forecast", "🗺️ Radar", "ℹ️ Details", "🧠 AI Predict & Anomalies"])
 
 with t1:
     hourly_df = pd.DataFrame(data['hourly'])
@@ -225,3 +225,90 @@ with t2:
 
 with t3:
     st.json(curr)
+
+with t4:
+    st.markdown("### 🔬 PyTorch LSTM & Anomaly Detection Pipeline")
+    st.write("Fetching 30 days of temperature records from Open-Meteo...")
+    
+    # Imports
+    try:
+        from ml.forecast import train_lstm, mc_dropout_predict
+        from ml.anomaly import detect_anomalies
+        import numpy as np
+    except Exception as e:
+        st.error(f"Error importing ML modules: {e}")
+        st.stop()
+        
+    lat = data['lat']
+    lon = data['lon']
+    history_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max&past_days=30&forecast_days=1&timezone=auto"
+    
+    try:
+        history_res = requests.get(history_url, timeout=10).json()
+        history_temps = history_res['daily']['temperature_2m_max']
+        dates = history_res['daily']['time']
+    except Exception as e:
+        history_temps = []
+        st.error(f"Could not load historical temperatures: {e}")
+        
+    if len(history_temps) >= 15:
+        # 1. Anomaly Detection (using rolling window of 7)
+        anom_res = detect_anomalies(history_temps, z_thresh=2.0, window=7)
+        anom_indices = anom_res["anomaly_indices"]
+        
+        # Plot history with anomalies
+        fig_anom = go.Figure()
+        fig_anom.add_trace(go.Scatter(
+            x=dates, y=history_temps,
+            mode='lines+markers', name='Max Temp (°C)',
+            line=dict(color='rgba(255,255,255,0.7)', width=2)
+        ))
+        
+        # Highlight anomalies
+        if anom_indices:
+            anom_dates = [dates[idx] for idx in anom_indices]
+            anom_vals = [history_temps[idx] for idx in anom_indices]
+            fig_anom.add_trace(go.Scatter(
+                x=anom_dates, y=anom_vals,
+                mode='markers', name='Anomaly 🚨',
+                marker=dict(color='#ff576c', size=10, symbol='circle')
+            ))
+            st.warning(f"Detected **{len(anom_indices)}** temperature anomalies in the past 30 days!")
+        else:
+            st.success("No temperature anomalies detected in the past 30 days.")
+            
+        fig_anom.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white'), margin=dict(t=20, l=0, r=0, b=0),
+            height=300, xaxis=dict(showgrid=False), yaxis=dict(showgrid=False)
+        )
+        st.plotly_chart(fig_anom, use_container_width=True)
+        
+        # 2. LSTM Prediction
+        st.markdown("#### 🔮 LSTM Deep Learning Prediction")
+        
+        with st.spinner("Running PyTorch LSTM model..."):
+            try:
+                # Train live on the fly
+                model, stats = train_lstm(history_temps, seq_len=7, epochs=80)
+                
+                # Predict next day
+                recent_window = history_temps[-7:]
+                pred_mean, pred_lower, pred_upper = mc_dropout_predict(model, recent_window, stats, n_samples=50, ci=0.95)
+                
+                # Show prediction details
+                st.markdown(f"""
+                <div style='background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px); 
+                            padding: 25px; border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.18); 
+                            text-align: center; margin: 20px 0;'>
+                    <h4 style='color: rgba(255,255,255,0.9); margin: 0; font-size: 1.1rem; text-transform: uppercase;'>LSTM Next-Day Max Temp Prediction</h4>
+                    <h1 style='color: #fda085; font-size: 3.5rem; margin: 15px 0; font-weight: 800;'>{pred_mean:.1f}°C</h1>
+                    <p style='color: white; margin: 0; font-size: 1.1rem;'>95% Confidence Interval: <strong>{pred_lower:.1f}°C to {pred_upper:.1f}°C</strong></p>
+                    <p style='color: rgba(255,255,255,0.5); font-size: 0.8rem; margin-top: 10px;'>Model trained live using PyTorch LSTM & Monte Carlo Dropout uncertainty</p>
+                </div>
+                """, unsafe_allow_html=True)
+            except Exception as e:
+                st.error(f"Error training LSTM: {e}")
+    else:
+        st.warning("Not enough temperature history to run AI models.")
+
